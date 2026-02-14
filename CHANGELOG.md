@@ -1,10 +1,9 @@
 # Changelog
 
-## 0.2.2 - Unreleased
+## 0.3.0 - 2026-02-14
 
 - Add user rating counts (`user_rating_count`) in search/nearby/details and CLI output (`Rating: 4.5 (532)`). (#3) - thanks @aligurelli
 - Add `goplaces directions` on Routes API with walking default, units control (metric default), optional steps, and drive comparison. - thanks @joshp123
-- Migrate `directions` off legacy Directions API to Routes `computeRoutes` endpoint.
 
 ## 0.2.1 - 2026-01-23
 
