@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,10 +13,14 @@ import (
 )
 
 const (
-	placesSearchPath  = "/places:searchText"
-	placesNearbyPath  = "/places:searchNearby"
-	routesComputePath = "/directions/v2:computeRoutes"
-	directionsPath    = "/maps/api/directions/json"
+	placesSearchPath       = "/places:searchText"
+	placesNearbyPath       = "/places:searchNearby"
+	routesComputePath      = "/directions/v2:computeRoutes"
+	directionsPath         = routesComputePath
+	directionsModeWalkAPI  = "WALK"
+	directionsModeDriveAPI = "DRIVE"
+	directionsModeWalking  = "walking"
+	directionsModeDriving  = "driving"
 )
 
 func TestRunSearchJSON(t *testing.T) {
@@ -355,25 +358,21 @@ func TestRunDirectionsJSON(t *testing.T) {
 		if r.URL.Path != directionsPath {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		query := r.URL.Query()
-		if query.Get("origin") != "A" {
-			t.Fatalf("unexpected origin: %s", query.Get("origin"))
+		if r.Header.Get("X-Goog-Api-Key") != "test-key" {
+			t.Fatalf("unexpected api key header: %s", r.Header.Get("X-Goog-Api-Key"))
 		}
-		if query.Get("destination") != "B" {
-			t.Fatalf("unexpected destination: %s", query.Get("destination"))
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
 		}
-		if query.Get("mode") != "walking" {
-			t.Fatalf("unexpected mode: %s", query.Get("mode"))
+		if payload["travelMode"] != directionsModeWalkAPI {
+			t.Fatalf("unexpected mode: %#v", payload["travelMode"])
 		}
-		if query.Get("units") != "metric" {
-			t.Fatalf("unexpected units: %s", query.Get("units"))
-		}
-		if query.Get("key") != "test-key" {
-			t.Fatalf("unexpected key: %s", query.Get("key"))
+		if payload["units"] != "METRIC" {
+			t.Fatalf("unexpected units: %#v", payload["units"])
 		}
 		_, _ = w.Write([]byte(`{
-  "status":"OK",
-  "routes":[{"summary":"Main","legs":[{"distance":{"text":"1 km","value":1000},"duration":{"text":"10 mins","value":600},"start_address":"A","end_address":"B","steps":[]}]}]
+  "routes":[{"description":"Main","legs":[{"distanceMeters":1000,"duration":"600s","localizedValues":{"distance":{"text":"1 km"},"duration":{"text":"10 mins"}},"steps":[]}]}]
 }`))
 	}))
 	defer server.Close()
@@ -386,7 +385,7 @@ func TestRunDirectionsJSON(t *testing.T) {
 		"--from", "A",
 		"--to", "B",
 		"--api-key", "test-key",
-		"--directions-base-url", server.URL + directionsPath,
+		"--directions-base-url", server.URL,
 		"--json",
 	}, &stdout, &stderr)
 
@@ -407,18 +406,21 @@ func TestRunDirectionsCompareJSON(t *testing.T) {
 		if r.URL.Path != directionsPath {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		mode := r.URL.Query().Get("mode")
-		seenModes[mode]++
-		duration := "10 mins"
-		seconds := 600
-		if mode == "driving" {
-			duration = "4 mins"
-			seconds = 240
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
 		}
-		_, _ = w.Write([]byte(`{
-  "status":"OK",
-  "routes":[{"summary":"Main","legs":[{"distance":{"text":"1 km","value":1000},"duration":{"text":"` + duration + `","value":` + fmt.Sprintf("%d", seconds) + `},"start_address":"A","end_address":"B","steps":[]}]}]
-}`))
+		mode, _ := payload["travelMode"].(string)
+		seenModes[mode]++
+		responseBody := `{
+  "routes":[{"description":"Main","legs":[{"distanceMeters":1000,"duration":"600s","localizedValues":{"distance":{"text":"1 km"},"duration":{"text":"10 mins"}},"steps":[]}]}]
+}`
+		if mode == directionsModeDriveAPI {
+			responseBody = `{
+  "routes":[{"description":"Main","legs":[{"distanceMeters":1000,"duration":"240s","localizedValues":{"distance":{"text":"1 km"},"duration":{"text":"4 mins"}},"steps":[]}]}]
+}`
+		}
+		_, _ = w.Write([]byte(responseBody))
 	}))
 	defer server.Close()
 
@@ -431,7 +433,7 @@ func TestRunDirectionsCompareJSON(t *testing.T) {
 		"--to", "B",
 		"--compare", "drive",
 		"--api-key", "test-key",
-		"--directions-base-url", server.URL + directionsPath,
+		"--directions-base-url", server.URL,
 		"--json",
 	}, &stdout, &stderr)
 
@@ -448,7 +450,7 @@ func TestRunDirectionsCompareJSON(t *testing.T) {
 	if results[0].Mode != "WALKING" || results[1].Mode != "DRIVING" {
 		t.Fatalf("unexpected mode order: %#v", results)
 	}
-	if seenModes["walking"] != 1 || seenModes["driving"] != 1 {
+	if seenModes[directionsModeWalkAPI] != 1 || seenModes[directionsModeDriveAPI] != 1 {
 		t.Fatalf("expected both modes requested once, got: %#v", seenModes)
 	}
 }
@@ -458,13 +460,16 @@ func TestRunDirectionsHumanCompareWithSteps(t *testing.T) {
 		if r.URL.Path != directionsPath {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		mode := r.URL.Query().Get("mode")
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		mode, _ := payload["travelMode"].(string)
 		if mode == "" {
 			t.Fatalf("missing mode")
 		}
 		_, _ = w.Write([]byte(`{
-  "status":"OK",
-  "routes":[{"summary":"Main","legs":[{"distance":{"text":"1 km","value":1000},"duration":{"text":"10 mins","value":600},"start_address":"A","end_address":"B","steps":[{"html_instructions":"Head <b>north</b>","distance":{"text":"0.2 km","value":200},"duration":{"text":"2 mins","value":120}}]}]}]
+  "routes":[{"description":"Main","legs":[{"distanceMeters":1000,"duration":"600s","localizedValues":{"distance":{"text":"1 km"},"duration":{"text":"10 mins"}},"steps":[{"distanceMeters":200,"staticDuration":"120s","localizedValues":{"distance":{"text":"0.2 km"},"staticDuration":{"text":"2 mins"}},"navigationInstruction":{"instructions":"Head north"}}]}]}]
 }`))
 	}))
 	defer server.Close()
@@ -479,7 +484,7 @@ func TestRunDirectionsHumanCompareWithSteps(t *testing.T) {
 		"--compare", "drive",
 		"--steps",
 		"--api-key", "test-key",
-		"--directions-base-url", server.URL + directionsPath,
+		"--directions-base-url", server.URL,
 	}, &stdout, &stderr)
 
 	if exitCode != 0 {
@@ -508,7 +513,7 @@ func TestRunDirectionsValidationErrors(t *testing.T) {
 		},
 		{
 			name: "same compare mode",
-			args: []string{"directions", "--from", "A", "--to", "B", "--mode", "walk", "--compare", "walking", "--api-key", "x"},
+			args: []string{"directions", "--from", "A", "--to", "B", "--mode", "walk", "--compare", directionsModeWalking, "--api-key", "x"},
 		},
 		{
 			name: "partial from latlng",
@@ -534,10 +539,10 @@ func TestRunDirectionsValidationErrors(t *testing.T) {
 
 func TestNormalizeDirectionsMode(t *testing.T) {
 	cases := map[string]string{
-		"walk":      "walking",
-		"walking":   "walking",
-		"drive":     "driving",
-		"driving":   "driving",
+		"walk":      directionsModeWalking,
+		"walking":   directionsModeWalking,
+		"drive":     directionsModeDriving,
+		"driving":   directionsModeDriving,
 		"bike":      "bicycling",
 		"bicycle":   "bicycling",
 		"bicycling": "bicycling",

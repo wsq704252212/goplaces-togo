@@ -22,7 +22,7 @@ type GlobalOptions struct {
 	APIKey            string        `help:"Google Places API key." env:"GOOGLE_PLACES_API_KEY"`
 	BaseURL           string        `help:"Places API base URL." env:"GOOGLE_PLACES_BASE_URL" default:"https://places.googleapis.com/v1"`
 	RoutesBaseURL     string        `help:"Routes API base URL." env:"GOOGLE_ROUTES_BASE_URL" default:"https://routes.googleapis.com"`
-	DirectionsBaseURL string        `help:"Directions API base URL." env:"GOOGLE_DIRECTIONS_BASE_URL" default:"https://maps.googleapis.com/maps/api/directions/json"`
+	DirectionsBaseURL string        `help:"Directions Routes API base URL." env:"GOOGLE_DIRECTIONS_BASE_URL" default:"https://routes.googleapis.com"`
 	Timeout           time.Duration `help:"HTTP timeout." default:"10s"`
 	JSON              bool          `help:"Output JSON."`
 	NoColor           bool          `help:"Disable color output."`

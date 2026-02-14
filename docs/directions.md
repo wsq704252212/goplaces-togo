@@ -1,10 +1,10 @@
 # Directions
 
-Use the Directions API (legacy) to get distance, duration, and step-by-step instructions.
+Use the Routes API (`computeRoutes`) to get distance, duration, and step-by-step instructions.
 
 ## Enable the API
 
-- Enable **Directions API** in Google Cloud Console for the same project as Places.
+- Enable **Routes API** in Google Cloud Console for the same project as Places.
 - Use the same `GOOGLE_PLACES_API_KEY` (recommended).
 
 ## Examples

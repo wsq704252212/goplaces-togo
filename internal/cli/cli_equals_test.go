@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,22 +122,18 @@ func TestRunDirectionsWithEqualsFlags(t *testing.T) {
 		if r.URL.Path != directionsPath {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		query := r.URL.Query()
-		if query.Get("origin") != "A" || query.Get("destination") != "B" {
-			t.Fatalf("unexpected route endpoints: %v", query)
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
 		}
-		if query.Get("mode") != "walking" {
-			t.Fatalf("unexpected mode: %s", query.Get("mode"))
+		if payload["travelMode"] != directionsModeWalkAPI {
+			t.Fatalf("unexpected mode: %#v", payload["travelMode"])
 		}
-		if query.Get("units") != "metric" {
-			t.Fatalf("unexpected units: %s", query.Get("units"))
-		}
-		if query.Get("key") != "test-key" {
-			t.Fatalf("unexpected key: %s", query.Get("key"))
+		if payload["units"] != "METRIC" {
+			t.Fatalf("unexpected units: %#v", payload["units"])
 		}
 		_, _ = w.Write([]byte(`{
-  "status":"OK",
-  "routes":[{"legs":[{"distance":{"text":"1 km","value":1000},"duration":{"text":"10 mins","value":600},"start_address":"A","end_address":"B","steps":[]}]}]
+  "routes":[{"legs":[{"distanceMeters":1000,"duration":"600s","localizedValues":{"distance":{"text":"1 km"},"duration":{"text":"10 mins"}},"steps":[]}]}]
 }`))
 	}))
 	defer server.Close()
@@ -149,7 +146,7 @@ func TestRunDirectionsWithEqualsFlags(t *testing.T) {
 		"--from=A",
 		"--to=B",
 		"--api-key=test-key",
-		"--directions-base-url=" + server.URL + directionsPath,
+		"--directions-base-url=" + server.URL,
 		"--mode=walk",
 		"--units=metric",
 		"--json",

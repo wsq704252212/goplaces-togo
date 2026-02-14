@@ -5,17 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
-	"io"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strings"
+	"time"
 )
 
 const (
-	defaultDirectionsBaseURL = "https://maps.googleapis.com/maps/api/directions/json"
+	defaultDirectionsBaseURL = defaultRoutesBaseURL
 )
+
+const directionsFieldMask = "routes.description,routes.warnings,routes.legs.distanceMeters,routes.legs.duration,routes.legs.localizedValues.distance,routes.legs.localizedValues.duration,routes.legs.steps.distanceMeters,routes.legs.steps.staticDuration,routes.legs.steps.localizedValues.distance,routes.legs.steps.localizedValues.staticDuration,routes.legs.steps.navigationInstruction.instructions,routes.legs.steps.navigationInstruction.maneuver,routes.legs.steps.travelMode"
 
 const (
 	directionsModeWalk    = "walking"
@@ -29,12 +28,10 @@ const (
 	directionsUnitsImperial = "imperial"
 )
 
-var directionsModes = map[string]struct{}{
-	directionsModeWalk:    {},
-	directionsModeDrive:   {},
-	directionsModeBicycle: {},
-	directionsModeTransit: {},
-}
+const (
+	routesUnitsMetric   = "METRIC"
+	routesUnitsImperial = "IMPERIAL"
+)
 
 var directionsUnits = map[string]struct{}{
 	directionsUnitsMetric:   {},
@@ -80,53 +77,23 @@ type DirectionsStep struct {
 	Maneuver        string `json:"maneuver,omitempty"`
 }
 
-// Directions fetches directions between two locations using the Google Directions API.
+// Directions fetches directions between two locations using the Routes API.
 func (c *Client) Directions(ctx context.Context, req DirectionsRequest) (DirectionsResponse, error) {
 	req = applyDirectionsDefaults(req)
 	if err := validateDirectionsRequest(req); err != nil {
 		return DirectionsResponse{}, err
 	}
 
-	origin, err := resolveDirectionsLocation("from", req.FromPlaceID, req.FromLocation, req.From)
-	if err != nil {
-		return DirectionsResponse{}, err
-	}
-	destination, err := resolveDirectionsLocation("to", req.ToPlaceID, req.ToLocation, req.To)
-	if err != nil {
-		return DirectionsResponse{}, err
-	}
-
-	query := map[string]string{
-		"origin":      origin,
-		"destination": destination,
-		"mode":        req.Mode,
-	}
-	if strings.TrimSpace(req.Language) != "" {
-		query["language"] = req.Language
-	}
-	if strings.TrimSpace(req.Region) != "" {
-		query["region"] = req.Region
-	}
-	if strings.TrimSpace(req.Units) != "" {
-		query["units"] = req.Units
-	}
-
-	endpoint, err := buildDirectionsURL(c.directionsBaseURL, query, c.apiKey)
+	body := buildDirectionsBody(req)
+	endpoint := directionsEndpoint(c.directionsBaseURL)
+	payload, err := c.doRequest(ctx, http.MethodPost, endpoint, body, directionsFieldMask)
 	if err != nil {
 		return DirectionsResponse{}, err
 	}
 
-	payload, err := c.doDirectionsRequest(ctx, endpoint)
-	if err != nil {
-		return DirectionsResponse{}, err
-	}
-
-	var apiResponse directionsAPIResponse
+	var apiResponse directionsRoutesResponse
 	if err := json.Unmarshal(payload, &apiResponse); err != nil {
 		return DirectionsResponse{}, fmt.Errorf("goplaces: decode directions response: %w", err)
-	}
-	if apiResponse.Status != "OK" {
-		return DirectionsResponse{}, fmt.Errorf("goplaces: directions status %s: %s", apiResponse.Status, strings.TrimSpace(apiResponse.ErrorMessage))
 	}
 	if len(apiResponse.Routes) == 0 || len(apiResponse.Routes[0].Legs) == 0 {
 		return DirectionsResponse{}, errors.New("goplaces: no directions returned")
@@ -137,25 +104,25 @@ func (c *Client) Directions(ctx context.Context, req DirectionsRequest) (Directi
 	steps := make([]DirectionsStep, 0, len(leg.Steps))
 	for _, step := range leg.Steps {
 		steps = append(steps, DirectionsStep{
-			Instruction:     cleanInstruction(step.HTMLInstructions),
-			DistanceText:    step.Distance.Text,
-			DistanceMeters:  step.Distance.Value,
-			DurationText:    step.Duration.Text,
-			DurationSeconds: step.Duration.Value,
-			TravelMode:      step.TravelMode,
-			Maneuver:        step.Maneuver,
+			Instruction:     strings.TrimSpace(step.NavigationInstruction.Instructions),
+			DistanceText:    strings.TrimSpace(step.LocalizedValues.Distance.Text),
+			DistanceMeters:  step.DistanceMeters,
+			DurationText:    strings.TrimSpace(step.LocalizedValues.StaticDuration.Text),
+			DurationSeconds: parseDurationSeconds(step.StaticDuration),
+			TravelMode:      strings.TrimSpace(step.TravelMode),
+			Maneuver:        strings.TrimSpace(step.NavigationInstruction.Maneuver),
 		})
 	}
 
 	return DirectionsResponse{
 		Mode:            strings.ToUpper(req.Mode),
-		Summary:         route.Summary,
-		StartAddress:    leg.StartAddress,
-		EndAddress:      leg.EndAddress,
-		DistanceText:    leg.Distance.Text,
-		DistanceMeters:  leg.Distance.Value,
-		DurationText:    leg.Duration.Text,
-		DurationSeconds: leg.Duration.Value,
+		Summary:         strings.TrimSpace(route.Description),
+		StartAddress:    directionsLocationLabel(req.FromPlaceID, req.FromLocation, req.From),
+		EndAddress:      directionsLocationLabel(req.ToPlaceID, req.ToLocation, req.To),
+		DistanceText:    strings.TrimSpace(leg.LocalizedValues.Distance.Text),
+		DistanceMeters:  leg.DistanceMeters,
+		DurationText:    strings.TrimSpace(leg.LocalizedValues.Duration.Text),
+		DurationSeconds: parseDurationSeconds(leg.Duration),
 		Warnings:        route.Warnings,
 		Steps:           steps,
 	}, nil
@@ -239,6 +206,14 @@ func resolveDirectionsLocation(label string, placeID string, location *LatLng, t
 	return strings.TrimSpace(text), nil
 }
 
+func directionsLocationLabel(placeID string, location *LatLng, text string) string {
+	label, err := resolveDirectionsLocation("location", placeID, location, text)
+	if err != nil {
+		return ""
+	}
+	return label
+}
+
 func normalizeDirectionsMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "walk", "walking":
@@ -254,105 +229,118 @@ func normalizeDirectionsMode(mode string) string {
 	}
 }
 
-func buildDirectionsURL(base string, query map[string]string, apiKey string) (string, error) {
-	if strings.TrimSpace(apiKey) == "" {
-		return "", ErrMissingAPIKey
+func directionsEndpoint(base string) string {
+	if strings.HasSuffix(base, routesPath) {
+		return base
 	}
-	parsed, err := url.Parse(base)
-	if err != nil {
-		return "", fmt.Errorf("goplaces: invalid directions url: %w", err)
+	return base + routesPath
+}
+
+func directionsTravelMode(mode string) string {
+	switch normalizeDirectionsMode(mode) {
+	case directionsModeWalk:
+		return travelModeWalk
+	case directionsModeDrive:
+		return travelModeDrive
+	case directionsModeBicycle:
+		return travelModeBicycle
+	case directionsModeTransit:
+		return travelModeTransit
+	default:
+		return travelModeWalk
 	}
-	values := parsed.Query()
-	for key, value := range query {
-		if strings.TrimSpace(value) == "" {
-			continue
+}
+
+func directionsRouteUnits(units string) string {
+	switch strings.ToLower(strings.TrimSpace(units)) {
+	case directionsUnitsImperial:
+		return routesUnitsImperial
+	default:
+		return routesUnitsMetric
+	}
+}
+
+func directionsWaypoint(placeID string, location *LatLng, text string) map[string]any {
+	if trimmed := strings.TrimSpace(placeID); trimmed != "" {
+		return map[string]any{"placeId": trimmed}
+	}
+	if location != nil {
+		return map[string]any{
+			"location": map[string]any{
+				"latLng": map[string]any{
+					"latitude":  location.Lat,
+					"longitude": location.Lng,
+				},
+			},
 		}
-		values.Set(key, value)
 	}
-	values.Set("key", apiKey)
-	parsed.RawQuery = values.Encode()
-	return parsed.String(), nil
+	return map[string]any{"address": strings.TrimSpace(text)}
 }
 
-func (c *Client) doDirectionsRequest(ctx context.Context, endpoint string) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func buildDirectionsBody(req DirectionsRequest) map[string]any {
+	body := map[string]any{
+		"origin":      directionsWaypoint(req.FromPlaceID, req.FromLocation, req.From),
+		"destination": directionsWaypoint(req.ToPlaceID, req.ToLocation, req.To),
+		"travelMode":  directionsTravelMode(req.Mode),
+		"units":       directionsRouteUnits(req.Units),
+	}
+	if strings.TrimSpace(req.Language) != "" {
+		body["languageCode"] = strings.TrimSpace(req.Language)
+	}
+	if strings.TrimSpace(req.Region) != "" {
+		body["regionCode"] = strings.TrimSpace(req.Region)
+	}
+	return body
+}
+
+func parseDurationSeconds(duration string) int {
+	parsed, err := time.ParseDuration(strings.TrimSpace(duration))
 	if err != nil {
-		return nil, fmt.Errorf("goplaces: build directions request: %w", err)
+		return 0
 	}
-
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("goplaces: directions request failed: %w", err)
-	}
-	defer func() {
-		_ = response.Body.Close()
-	}()
-
-	allowEmptyBody := response.StatusCode >= http.StatusBadRequest
-	payload, err := readResponseBody(response, allowEmptyBody)
-	if err != nil {
-		return nil, err
-	}
-
-	if response.StatusCode >= http.StatusBadRequest {
-		apiErr := &APIError{StatusCode: response.StatusCode, Body: strings.TrimSpace(string(payload))}
-		return nil, apiErr
-	}
-
-	return payload, nil
+	return int(parsed.Seconds())
 }
 
-type directionsAPIResponse struct {
-	Status       string            `json:"status"`
-	ErrorMessage string            `json:"error_message,omitempty"`
-	Routes       []directionsRoute `json:"routes"`
+type directionsRoutesResponse struct {
+	Routes []directionsRoutesRoute `json:"routes"`
 }
 
-type directionsRoute struct {
-	Summary  string          `json:"summary,omitempty"`
-	Warnings []string        `json:"warnings,omitempty"`
-	Legs     []directionsLeg `json:"legs"`
+type directionsRoutesRoute struct {
+	Description string                `json:"description,omitempty"`
+	Warnings    []string              `json:"warnings,omitempty"`
+	Legs        []directionsRoutesLeg `json:"legs"`
 }
 
-type directionsLeg struct {
-	Distance     directionsValue  `json:"distance"`
-	Duration     directionsValue  `json:"duration"`
-	StartAddress string           `json:"start_address,omitempty"`
-	EndAddress   string           `json:"end_address,omitempty"`
-	Steps        []directionsStep `json:"steps"`
+type directionsRoutesLeg struct {
+	DistanceMeters  int                          `json:"distanceMeters"`
+	Duration        string                       `json:"duration"`
+	LocalizedValues directionsLegLocalizedValues `json:"localizedValues"`
+	Steps           []directionsRoutesStep       `json:"steps"`
 }
 
-type directionsStep struct {
-	HTMLInstructions string          `json:"html_instructions,omitempty"`
-	Distance         directionsValue `json:"distance"`
-	Duration         directionsValue `json:"duration"`
-	TravelMode       string          `json:"travel_mode,omitempty"`
-	Maneuver         string          `json:"maneuver,omitempty"`
+type directionsRoutesStep struct {
+	DistanceMeters        int                             `json:"distanceMeters"`
+	StaticDuration        string                          `json:"staticDuration"`
+	TravelMode            string                          `json:"travelMode,omitempty"`
+	NavigationInstruction directionsNavigationInstruction `json:"navigationInstruction"`
+	LocalizedValues       directionsStepLocalizedValues   `json:"localizedValues"`
 }
 
-type directionsValue struct {
-	Text  string `json:"text,omitempty"`
-	Value int    `json:"value,omitempty"`
+type directionsNavigationInstruction struct {
+	Instructions string `json:"instructions,omitempty"`
+	Maneuver     string `json:"maneuver,omitempty"`
 }
 
-var htmlTagPattern = regexp.MustCompile(`<[^>]+>`)
-
-func cleanInstruction(input string) string {
-	// Replace tags with spaces so words from adjacent nodes do not collapse.
-	cleaned := htmlTagPattern.ReplaceAllString(input, " ")
-	cleaned = html.UnescapeString(cleaned)
-	cleaned = strings.TrimSpace(cleaned)
-	cleaned = strings.Join(strings.Fields(cleaned), " ")
-	return cleaned
+type directionsLegLocalizedValues struct {
+	Distance directionsLocalizedText `json:"distance"`
+	Duration directionsLocalizedText `json:"duration"`
 }
 
-func readResponseBody(response *http.Response, allowEmpty bool) ([]byte, error) {
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("goplaces: read response: %w", err)
-	}
-	if len(payload) == 0 && !allowEmpty {
-		return nil, errors.New("goplaces: empty response")
-	}
-	return payload, nil
+type directionsStepLocalizedValues struct {
+	Distance       directionsLocalizedText `json:"distance"`
+	StaticDuration directionsLocalizedText `json:"staticDuration"`
+}
+
+type directionsLocalizedText struct {
+	Text string `json:"text,omitempty"`
 }

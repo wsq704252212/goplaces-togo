@@ -2,7 +2,9 @@ package goplaces
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,41 +13,68 @@ import (
 
 func TestDirectionsRequestPlaceID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query()
-		if query.Get("origin") != "place_id:from" {
-			t.Fatalf("unexpected origin: %s", query.Get("origin"))
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
 		}
-		if query.Get("destination") != "place_id:to" {
-			t.Fatalf("unexpected destination: %s", query.Get("destination"))
+		if r.URL.Path != routesPath {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if query.Get("mode") != directionsModeWalk {
-			t.Fatalf("unexpected mode: %s", query.Get("mode"))
+		if r.Header.Get("X-Goog-Api-Key") != "test-key" {
+			t.Fatalf("unexpected api key header: %s", r.Header.Get("X-Goog-Api-Key"))
 		}
-		if query.Get("units") != directionsUnitsMetric {
-			t.Fatalf("unexpected units: %s", query.Get("units"))
+		if r.Header.Get("X-Goog-FieldMask") != directionsFieldMask {
+			t.Fatalf("unexpected field mask: %s", r.Header.Get("X-Goog-FieldMask"))
 		}
-		if query.Get("key") != "test-key" {
-			t.Fatalf("unexpected key: %s", query.Get("key"))
+		var payload map[string]any
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
 		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if payload["travelMode"] != travelModeWalk {
+			t.Fatalf("unexpected travel mode: %#v", payload["travelMode"])
+		}
+		if payload["units"] != routesUnitsMetric {
+			t.Fatalf("unexpected units: %#v", payload["units"])
+		}
+		origin, ok := payload["origin"].(map[string]any)
+		if !ok || origin["placeId"] != "from" {
+			t.Fatalf("unexpected origin payload: %#v", payload["origin"])
+		}
+		destination, ok := payload["destination"].(map[string]any)
+		if !ok || destination["placeId"] != "to" {
+			t.Fatalf("unexpected destination payload: %#v", payload["destination"])
+		}
+
 		_, _ = w.Write([]byte(`{
-			"status": "OK",
-			"routes": [{
-				"summary": "Main",
-				"warnings": ["test"],
-				"legs": [{
-					"distance": {"text": "1 km", "value": 1000},
-					"duration": {"text": "10 mins", "value": 600},
-					"start_address": "Start",
-					"end_address": "End",
-					"steps": [{
-						"html_instructions": "Head <b>north</b>",
-						"distance": {"text": "0.2 km", "value": 200},
-						"duration": {"text": "2 mins", "value": 120},
-						"travel_mode": "WALKING"
-					}]
-				}]
-			}]
-		}`))
+  "routes": [{
+    "description": "Main",
+    "warnings": ["test"],
+    "legs": [{
+      "distanceMeters": 1000,
+      "duration": "600s",
+      "localizedValues": {
+        "distance": {"text": "1 km"},
+        "duration": {"text": "10 mins"}
+      },
+      "steps": [{
+        "distanceMeters": 200,
+        "staticDuration": "120s",
+        "localizedValues": {
+          "distance": {"text": "0.2 km"},
+          "staticDuration": {"text": "2 mins"}
+        },
+        "travelMode": "WALK",
+        "navigationInstruction": {
+          "instructions": "Head north",
+          "maneuver": "TURN_LEFT"
+        }
+      }]
+    }]
+  }]
+}`))
 	}))
 	defer server.Close()
 
@@ -61,8 +90,17 @@ func TestDirectionsRequestPlaceID(t *testing.T) {
 	if response.DistanceMeters != 1000 {
 		t.Fatalf("unexpected distance: %d", response.DistanceMeters)
 	}
+	if response.DurationSeconds != 600 {
+		t.Fatalf("unexpected duration seconds: %d", response.DurationSeconds)
+	}
+	if response.StartAddress != "place_id:from" || response.EndAddress != "place_id:to" {
+		t.Fatalf("unexpected start/end labels: %q -> %q", response.StartAddress, response.EndAddress)
+	}
 	if len(response.Steps) != 1 || response.Steps[0].Instruction != "Head north" {
 		t.Fatalf("unexpected steps: %#v", response.Steps)
+	}
+	if response.Steps[0].Maneuver != "TURN_LEFT" {
+		t.Fatalf("unexpected step maneuver: %#v", response.Steps[0])
 	}
 	if response.Mode != "WALKING" {
 		t.Fatalf("unexpected mode: %s", response.Mode)
@@ -95,14 +133,14 @@ func TestDirectionsLocationValidation(t *testing.T) {
 
 func TestNormalizeDirectionsModeAliases(t *testing.T) {
 	cases := map[string]string{
-		"walk":      "walking",
-		"walking":   "walking",
-		"drive":     "driving",
-		"driving":   "driving",
-		"bike":      "bicycling",
-		"bicycle":   "bicycling",
-		"bicycling": "bicycling",
-		"transit":   "transit",
+		"walk":      directionsModeWalk,
+		"walking":   directionsModeWalk,
+		"drive":     directionsModeDrive,
+		"driving":   directionsModeDrive,
+		"bike":      directionsModeBicycle,
+		"bicycle":   directionsModeBicycle,
+		"bicycling": directionsModeBicycle,
+		"transit":   directionsModeTransit,
 	}
 	for input, want := range cases {
 		if got := normalizeDirectionsMode(input); got != want {
@@ -128,12 +166,22 @@ func TestResolveDirectionsLocationVariants(t *testing.T) {
 	}
 }
 
-func TestBuildDirectionsURLErrors(t *testing.T) {
-	if _, err := buildDirectionsURL("://bad", map[string]string{}, "k"); err == nil {
-		t.Fatal("expected invalid URL error")
+func TestDirectionsEndpointCompatibility(t *testing.T) {
+	if got := directionsEndpoint("https://routes.googleapis.com"); got != "https://routes.googleapis.com"+routesPath {
+		t.Fatalf("unexpected endpoint: %s", got)
 	}
-	if _, err := buildDirectionsURL("https://example.com", map[string]string{}, ""); !errors.Is(err, ErrMissingAPIKey) {
-		t.Fatalf("expected ErrMissingAPIKey, got %v", err)
+	full := "https://routes.googleapis.com" + routesPath
+	if got := directionsEndpoint(full); got != full {
+		t.Fatalf("unexpected full endpoint handling: %s", got)
+	}
+}
+
+func TestParseDurationSeconds(t *testing.T) {
+	if got := parseDurationSeconds("600s"); got != 600 {
+		t.Fatalf("unexpected parsed duration: %d", got)
+	}
+	if got := parseDurationSeconds("not-a-duration"); got != 0 {
+		t.Fatalf("unexpected parsed invalid duration: %d", got)
 	}
 }
 
@@ -157,22 +205,9 @@ func TestDirectionsHTTPErrorWithEmptyBody(t *testing.T) {
 	}
 }
 
-func TestDirectionsStatusError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"ZERO_RESULTS","error_message":"none"}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(Options{APIKey: "test-key", DirectionsBaseURL: server.URL})
-	_, err := client.Directions(context.Background(), DirectionsRequest{From: "A", To: "B"})
-	if err == nil || !strings.Contains(err.Error(), "directions status ZERO_RESULTS") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestDirectionsNoRoutesReturned(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"OK","routes":[]}`))
+		_, _ = w.Write([]byte(`{"routes":[]}`))
 	}))
 	defer server.Close()
 
@@ -198,26 +233,39 @@ func TestDirectionsEmptyBodySuccessStatus(t *testing.T) {
 
 func TestDirectionsRequestLocaleAndImperialUnits(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query()
-		if query.Get("origin") != "Seattle" || query.Get("destination") != "Portland" {
-			t.Fatalf("unexpected endpoints: %v", query)
+		if r.URL.Path != routesPath {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if query.Get("mode") != directionsModeDrive {
-			t.Fatalf("unexpected mode: %s", query.Get("mode"))
+		var payload map[string]any
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
 		}
-		if query.Get("language") != "en-US" {
-			t.Fatalf("unexpected language: %s", query.Get("language"))
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
 		}
-		if query.Get("region") != "US" {
-			t.Fatalf("unexpected region: %s", query.Get("region"))
+		if payload["travelMode"] != travelModeDrive {
+			t.Fatalf("unexpected mode: %#v", payload["travelMode"])
 		}
-		if query.Get("units") != directionsUnitsImperial {
-			t.Fatalf("unexpected units: %s", query.Get("units"))
+		if payload["languageCode"] != "en-US" {
+			t.Fatalf("unexpected language: %#v", payload["languageCode"])
+		}
+		if payload["regionCode"] != "US" {
+			t.Fatalf("unexpected region: %#v", payload["regionCode"])
+		}
+		if payload["units"] != routesUnitsImperial {
+			t.Fatalf("unexpected units: %#v", payload["units"])
 		}
 		_, _ = w.Write([]byte(`{
-			"status":"OK",
-			"routes":[{"legs":[{"distance":{"text":"1 mi","value":1609},"duration":{"text":"5 mins","value":300},"start_address":"Seattle","end_address":"Portland","steps":[]}]}]
-		}`))
+  "routes":[{
+    "legs":[{
+      "distanceMeters":1609,
+      "duration":"300s",
+      "localizedValues":{"distance":{"text":"1 mi"},"duration":{"text":"5 mins"}},
+      "steps":[]
+    }]
+  }]
+}`))
 	}))
 	defer server.Close()
 
@@ -252,12 +300,5 @@ func TestDirectionsLocationBoundsValidation(t *testing.T) {
 	err = validateDirectionsRequest(applyDirectionsDefaults(req))
 	if err == nil || !strings.Contains(err.Error(), "to.lng") {
 		t.Fatalf("unexpected error for longitude: %v", err)
-	}
-}
-
-func TestCleanInstructionPreservesWordSpacing(t *testing.T) {
-	got := cleanInstruction("Turn right<div>onto <b>Main St</b></div>")
-	if got != "Turn right onto Main St" {
-		t.Fatalf("unexpected instruction: %q", got)
 	}
 }
