@@ -671,6 +671,37 @@ func TestBuildSearchBodyOmitsEmptyPriceLevels(t *testing.T) {
 	}
 }
 
+func TestNewClientDefaults(t *testing.T) {
+	client := NewClient(Options{APIKey: "test-key"})
+	if client.baseURL != DefaultBaseURL {
+		t.Fatalf("unexpected baseURL: %s", client.baseURL)
+	}
+	if client.routesBaseURL != defaultRoutesBaseURL {
+		t.Fatalf("unexpected routesBaseURL: %s", client.routesBaseURL)
+	}
+	if client.directionsBaseURL != defaultDirectionsBaseURL {
+		t.Fatalf("unexpected directionsBaseURL: %s", client.directionsBaseURL)
+	}
+}
+
+func TestNewClientCustomDirectionsBaseURL(t *testing.T) {
+	client := NewClient(Options{
+		APIKey:            "test-key",
+		BaseURL:           "https://example.com/v1/",
+		RoutesBaseURL:     "https://routes.example.com/",
+		DirectionsBaseURL: "https://maps.example.com/directions/",
+	})
+	if client.baseURL != "https://example.com/v1" {
+		t.Fatalf("unexpected baseURL: %s", client.baseURL)
+	}
+	if client.routesBaseURL != "https://routes.example.com" {
+		t.Fatalf("unexpected routesBaseURL: %s", client.routesBaseURL)
+	}
+	if client.directionsBaseURL != "https://maps.example.com/directions" {
+		t.Fatalf("unexpected directionsBaseURL: %s", client.directionsBaseURL)
+	}
+}
+
 func TestMappingHelpers(t *testing.T) {
 	if mapLatLng(nil) != nil {
 		t.Fatalf("expected nil location")

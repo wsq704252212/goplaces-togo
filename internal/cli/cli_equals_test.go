@@ -115,3 +115,53 @@ func TestRunRouteWithEqualsFlags(t *testing.T) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
 	}
 }
+
+func TestRunDirectionsWithEqualsFlags(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != directionsPath {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("origin") != "A" || query.Get("destination") != "B" {
+			t.Fatalf("unexpected route endpoints: %v", query)
+		}
+		if query.Get("mode") != "walking" {
+			t.Fatalf("unexpected mode: %s", query.Get("mode"))
+		}
+		if query.Get("units") != "metric" {
+			t.Fatalf("unexpected units: %s", query.Get("units"))
+		}
+		if query.Get("key") != "test-key" {
+			t.Fatalf("unexpected key: %s", query.Get("key"))
+		}
+		_, _ = w.Write([]byte(`{
+  "status":"OK",
+  "routes":[{"legs":[{"distance":{"text":"1 km","value":1000},"duration":{"text":"10 mins","value":600},"start_address":"A","end_address":"B","steps":[]}]}]
+}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{
+		"directions",
+		"--from=A",
+		"--to=B",
+		"--api-key=test-key",
+		"--directions-base-url=" + server.URL + directionsPath,
+		"--mode=walk",
+		"--units=metric",
+		"--json",
+	}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d (stdout=%s stderr=%s)", exitCode, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "\"mode\": \"WALKING\"") {
+		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
