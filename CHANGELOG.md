@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.3.1 - Unreleased
+
 ## 0.3.0 - 2026-02-14
 
 - Add user rating counts (`user_rating_count`) in search/nearby/details and CLI output (`Rating: 4.5 (532)`). (#3) - thanks @aligurelli
