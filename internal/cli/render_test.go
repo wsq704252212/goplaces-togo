@@ -154,6 +154,55 @@ func TestRenderRouteEmpty(t *testing.T) {
 	}
 }
 
+func TestRenderDirections(t *testing.T) {
+	response := goplaces.DirectionsResponse{
+		Mode:         "WALKING",
+		StartAddress: "Start",
+		EndAddress:   "End",
+		DistanceText: "1 km",
+		DurationText: "10 mins",
+		Steps: []goplaces.DirectionsStep{
+			{Instruction: "Head north", DistanceText: "0.2 km", DurationText: "2 mins"},
+		},
+	}
+	output := renderDirections(NewColor(false), response, true)
+	if !strings.Contains(output, "Directions") {
+		t.Fatalf("missing directions header")
+	}
+	if !strings.Contains(output, "Head north") {
+		t.Fatalf("missing step")
+	}
+	if !strings.Contains(output, "Distance") {
+		t.Fatalf("missing distance")
+	}
+}
+
+func TestRenderDirectionsWarningsAndEmptySteps(t *testing.T) {
+	response := goplaces.DirectionsResponse{
+		StartAddress: "Start",
+		EndAddress:   "End",
+		Warnings:     []string{"", "Use caution"},
+	}
+
+	output := renderDirections(NewColor(false), response, true)
+	if !strings.Contains(output, "Warnings:") {
+		t.Fatalf("missing warnings header: %s", output)
+	}
+	if !strings.Contains(output, "Use caution") {
+		t.Fatalf("missing warning entry: %s", output)
+	}
+	if !strings.Contains(output, "No results.") {
+		t.Fatalf("missing empty steps message: %s", output)
+	}
+}
+
+func TestDirectionsStepLineFallback(t *testing.T) {
+	line := directionsStepLine(goplaces.DirectionsStep{})
+	if line != "(no instruction)" {
+		t.Fatalf("unexpected step line: %q", line)
+	}
+}
+
 func TestFormatTitleFallback(t *testing.T) {
 	title := formatTitle(NewColor(false), "", "")
 	if !strings.Contains(title, "(no name)") {
