@@ -20,7 +20,7 @@ Modern Go client + CLI for the Google Places API (New). Fast for humans, tidy fo
 
 ## Install / Run
 
-Latest release: v0.2.1 (2026-01-23).
+Latest release: v0.3.0 (2026-02-14).
 
 - Homebrew: `brew install steipete/tap/goplaces`
 - Go: `go install github.com/steipete/goplaces/cmd/goplaces@latest`
