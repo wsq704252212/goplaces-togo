@@ -31,6 +31,7 @@ Help the user pick one place to visit from their saved Google Places list by fet
       "name": "string",
       "mapsUrl": "string | null",
       "placeId": "string | null",
+      "city": "string | null",
       "userComment": "string | null",
       "addedAt": "YYYY-MM-DD"
     }
@@ -38,6 +39,7 @@ Help the user pick one place to visit from their saved Google Places list by fet
   "places": {
     "<place_id>": {
       "name": "string",
+      "city": "string | null",
       "visits": [
         { "date": "YYYY-MM-DD", "time": "HH:MM", "note": "string | null" }
       ]
@@ -47,6 +49,7 @@ Help the user pick one place to visit from their saved Google Places list by fet
 ```
 
 - `savedList` — the user's saved places, persisted so they don't have to paste it again.
+- `savedList[].city` — normalised city name resolved via the Places API; used to filter by city before scoring.
 - `places` — keyed by `place_id`, holds visit history for recording and recency scoring.
 
 ## Steps
@@ -100,24 +103,42 @@ For each non-empty data row (skip the header and blank rows):
 
 After parsing, write the resulting array to `savedList` in `skills/goplaces-togo/goplaces-visits.json` immediately, before doing any API calls. This ensures the list is never lost even if the session ends early.
 
-Also update the data file schema to include `mapsUrl`:
+### 3. Classify each place by city
 
-```json
-{
-  "savedList": [
-    {
-      "name": "string",
-      "mapsUrl": "string | null",
-      "placeId": "string | null",
-      "userComment": "string | null",
-      "addedAt": "YYYY-MM-DD"
-    }
-  ],
-  "places": { ... }
-}
+For every entry in `savedList` where `city` is `null`, resolve the place name to get its city:
+
+```bash
+goplaces resolve "<place name>" --limit 1 --json
 ```
 
-### 3. Ask for cuisine and location preferences
+From the result, extract the city using this priority order:
+1. `candidates[0].addressComponents` — find the component with `types` containing `"locality"` → use its `longText`
+2. Fall back to the component with `types` containing `"administrative_area_level_2"` → use its `longText`
+3. Fall back to parsing the city token from `candidates[0].formattedAddress` (typically the second comma-separated segment, e.g. `"Gochi, Cupertino, CA 95014"` → `"Cupertino"`)
+4. If all fail, set `city` to `null` and note the entry as unclassified
+
+Normalise city names to title case (e.g. `"cupertino"` → `"Cupertino"`). Store `placeId` from `candidates[0].place_id` at the same time — no need to re-resolve in Step 4.
+
+After classifying all entries, write the updated `savedList` (with `city` and `placeId` filled in) back to disk.
+
+Show the user a summary grouped by city:
+
+> Found N places across X cities:
+> - **Cupertino** (3): Gochi Cupertino, Eilleen's Kitchen, ...
+> - **Santa Clara** (2): Pho to Chau 999, ...
+> - **Unclassified** (1): Some Place Name
+
+### 4. Ask which city they are in today
+
+Say exactly:
+
+> Which city are you in today? (or press Enter to search all cities)
+
+- If the user names a city → filter `savedList` to entries where `city` matches (case-insensitive). Use only these for scoring. If the city has zero matches, say so and ask again or offer to search all.
+- If the user presses Enter or says "all" / "anywhere" → use the full `savedList`.
+- Store the chosen city as `currentCity` (or `null` for all) in memory for this session.
+
+### 5. Ask for cuisine and location preferences
 
 Say exactly:
 
@@ -129,17 +150,17 @@ Wait for the user's response. Parse two optional values:
 
 If the user skips both, proceed without preference filtering.
 
-### 4. Resolve each place name to a place ID
+### 6. Resolve any remaining unresolved place IDs
 
-For every entry without a `placeId`, run:
+Step 3 already resolved and stored `placeId` for newly imported entries. Only re-run resolve for entries that still have `placeId: null` (e.g. manually added entries):
 
 ```bash
 goplaces resolve "<place name>" --limit 1 --json
 ```
 
-Parse the JSON. Take `candidates[0].place_id`. If the result is empty, mark the entry as unresolvable and skip it (report at the end).
+Parse the JSON. Take `candidates[0].place_id`. Also backfill `city` if it is still `null`. If the result is empty, mark the entry as unresolvable and skip it (report at the end).
 
-### 5. Fetch details for each place ID
+### 7. Fetch details for each place ID
 
 ```bash
 goplaces details <place_id> --reviews --json
@@ -156,13 +177,13 @@ Collect the following fields for each place:
 - `reviews[0].text.text` — top review snippet (first 150 chars)
 - `editorialSummary.text` — one-line editorial blurb if present
 
-### 6. Load visit history
+### 8. Load visit history
 
 The `places` section of `skills/goplaces-togo/goplaces-visits.json` was already read in Step 1. For each place in the working list, look up its `place_id` in `places` and derive:
 - `visitCount` — length of the `visits` array (0 if the key is absent).
 - `daysSinceLastVisit` — days between today and `visits[last].date` (`null` if never visited).
 
-### 7. Score and rank
+### 9. Score and rank
 
 Compute a score for each resolved place. All bonus terms are additive.
 
@@ -204,7 +225,7 @@ score = base + open + cuisine + location + comment + recency
 
 Rank places by `score` descending. Exclude unresolvable entries from the ranking but list them at the end.
 
-### 8. Recommend exactly one place
+### 10. Recommend exactly one place
 
 Present the top-ranked place as your recommendation using this format:
 
@@ -236,7 +257,7 @@ Finish with any unresolvable entries: "Could not look up: X, Y — please check 
 
 If only one place was provided, still confirm it looks good (or flag if it is closed, poorly rated, or visited very recently).
 
-### 9. Confirm selection and record the visit
+### 11. Confirm selection and record the visit
 
 After showing the recommendation, ask:
 
@@ -257,7 +278,7 @@ Wait for the user's response.
 
 - If the user says no or skips, say "No worries — enjoy your day!" and do nothing.
 
-### 10. Handle edge cases
+### 12. Handle edge cases
 
 - **No places resolved**: Tell the user none of the entries could be matched and ask them to double-check names or paste Google Maps URLs instead.
 - **All places closed**: State that all options appear closed right now, rank by score anyway, and caveat the recommendation.
@@ -266,6 +287,8 @@ Wait for the user's response.
 - **History file corrupt**: Warn the user, treat both `savedList` and `places` as empty, and do not overwrite until the user provides a list or confirms a visit.
 - **User wants to clear the list**: If the user says "clear my list" or "forget my places", set `savedList` to `[]` in `skills/goplaces-togo/goplaces-visits.json` (keep `places` history intact) and confirm: "Your saved list has been cleared. Paste a new list whenever you're ready."
 - **User wants to remove one entry**: If the user says "remove <name>", delete the matching entry from `savedList` by name (case-insensitive), write to disk, confirm removal. Leave `places` history for that place_id untouched.
+- **City classification fails for some entries**: Proceed normally; list unclassified entries under "Unclassified" in the city summary. If the user picks a city, exclude unclassified entries from that city's pool but offer: "I also have N unclassified places — include them?"
+- **User's city has only one place**: Recommend it directly (skip scoring), but flag if it is closed or poorly rated.
 
 ## Capture behavior
 
@@ -289,6 +312,15 @@ These phrases can be said at any point — not just during the recommendation fl
 | "Disappointing, won't go back" | Log negative note on that visit. Update `userComment` in `savedList` to "disappointing — avoid". This will feed a -1.5 comment penalty in future scoring. |
 | "Great for lunch but too loud for dinner" | Log as conditional note. Update `userComment` to "good for lunch, too loud for dinner". Future scoring will match against time-of-day. |
 | "The omakase was worth it, go on weekdays" | Update `userComment` in `savedList` to the verbatim advice. Confirm: "Updated your note for <Place>." |
+
+### City browsing
+
+| User says | Action |
+|-----------|--------|
+| "What cities do I have?" | Group `savedList` by `city` and print each city with the count and names of places in it. |
+| "Show me my Tokyo places" | Filter `savedList` to `city == "Tokyo"` and list them with userComment and visit count. |
+| "I'm in San Jose today" | Set `currentCity = "San Jose"` for this session, filter the working list accordingly, and jump straight to Step 5. |
+| "Show places near Cupertino" | Resolve "Cupertino" to lat/lng, then re-score using location bonus for all places regardless of city. |
 
 ### List management
 
