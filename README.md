@@ -223,6 +223,62 @@ route, err := client.Route(ctx, goplaces.RouteRequest{
 })
 ```
 
+## Skill — goplaces-togo
+
+The [`skills/SKILL.md`](skills/SKILL.md) file defines a **openclaw skill** that turns your Google saved places into a personal dining advisor.
+
+### What it does
+
+1. **Imports your Google saved places** — export from [Google Takeout](https://takeout.google.com) (select "Saved" only) and hand the CSV to the agent once. It stores the list in `skills/goplaces-togo/goplaces-visits.json` and never asks again.
+2. **Asks what you're in the mood for** — optional cuisine type and neighbourhood. Skip both to get a purely score-based pick.
+3. **Looks up every place live** via `goplaces resolve` + `goplaces details --reviews --json` to get current ratings, open status, price, and review snippets.
+4. **Scores and ranks** using a formula that weighs rating × review count, open-now status, cuisine/location match, your own saved notes, and a recency penalty so you don't keep going back to the same place.
+5. **Recommends one place** with a short explanation, then logs the visit to `goplaces-visits.json` when you confirm.
+
+### Persistent state
+
+All state lives in `skills/goplaces-togo/goplaces-visits.json`:
+
+```json
+{
+  "savedList": [
+    { "name": "Kunjip Tofu", "mapsUrl": "...", "placeId": null, "userComment": "Fine and good for date", "addedAt": "2026-03-08" }
+  ],
+  "places": {
+    "<place_id>": {
+      "name": "Kunjip Tofu",
+      "visits": [{ "date": "2026-03-08", "time": "19:30", "note": "great hot pot" }]
+    }
+  }
+}
+```
+
+### Natural language commands (anytime)
+
+| Say | Effect |
+|-----|--------|
+| `"I went to Kunjip last night"` | Retroactively logs a visit with yesterday's date |
+| `"It was amazing"` | Updates the note on the most recent visit and boosts the place's score |
+| `"Add Nobu to my list"` | Appends an entry to `savedList` |
+| `"Show me my list"` | Prints all saved places with visit counts |
+| `"Surprise me"` | Skips preference questions, recommends top scorer directly |
+| `"Same as last time"` | Reuses your last cuisine + location preference |
+
+### Setup
+
+```bash
+# The skill file is at skills/SKILL.md in this repo
+
+# Required env var
+export GOOGLE_PLACES_API_KEY="..."
+
+# Get your saved places CSV
+# 1. Go to https://takeout.google.com
+# 2. Deselect all → check "Saved" only → Export once
+# 3. Unzip → find Saved/Saved Places.csv
+# 4. Give the file path to the agent
+```
+
 ## Notes
 
 - `Filters.Types` maps to `includedType` (Google accepts a single value). Only the first type is sent.
